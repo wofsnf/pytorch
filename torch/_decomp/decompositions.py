@@ -3268,8 +3268,22 @@ def upsample_bilinear2d_vec(input, output_size, align_corners, scale_factors):
     return upsample_bilinear2d(input, osize, align_corners, scale_h, scale_w)
 
 
-@register_decomposition(aten.upsample_bilinear2d.default)
+@register_decomposition([aten.upsample_linear1d.default, aten.upsample_linear1d.out])
+@aten.upsample_linear1d.default.py_impl(DispatchKey.Autograd)
+@out_wrapper()
+@pw_cast_for_opmath
+def upsample_linear1d(
+    input: Tensor,
+    output_size: List[int],
+    align_corners: bool,
+    scales_w: Optional[float] = None,
+) -> Tensor:
+    return _upsample_linear(input, output_size, align_corners, [scales_w])
+
+
+@register_decomposition([aten.upsample_bilinear2d.default, aten.upsample_bilinear2d.out])
 @aten.upsample_bilinear2d.default.py_impl(DispatchKey.Autograd)
+@out_wrapper()
 @pw_cast_for_opmath
 def upsample_bilinear2d(
     input: Tensor,
@@ -3278,63 +3292,90 @@ def upsample_bilinear2d(
     scales_h: Optional[float] = None,
     scales_w: Optional[float] = None,
 ) -> Tensor:
+    return _upsample_linear(input, output_size, align_corners, [scales_h, scales_w])
+
+
+@register_decomposition([aten.upsample_trilinear3d.default, aten.upsample_trilinear3d.out])
+@aten.upsample_trilinear3d.default.py_impl(DispatchKey.Autograd)
+@out_wrapper()
+@pw_cast_for_opmath
+def upsample_trilinear3d(
+    input: Tensor,
+    output_size: List[int],
+    align_corners: bool,
+    scales_d: Optional[float] = None,
+    scales_h: Optional[float] = None,
+    scales_w: Optional[float] = None,
+) -> Tensor:
+    return _upsample_linear(
+        input, output_size, align_corners, [scales_d, scales_h, scales_w]
+    )
+
+
+def _upsample_linear(
+    input: Tensor,
+    output_size: List[int],
+    align_corners: bool,
+    scales: List[Optional[float]],
+) -> Tensor:
     # get dimensions of original image
-    n_batch, n_channels, in_h, in_w = input.shape
+    n_batch, n_channels = input.shape[:2]
+    inp_size = input.shape[2:]
 
-    out_h = output_size[0]
-    out_w = output_size[1]
-
-    # Calculate horizontal and vertical scaling factor
-    # TODO: Figure out if scales_h/scales_w matters here
-    if out_h > 1:
-        if align_corners:
-            h_scale_factor = (in_h - 1) / (out_h - 1)
+    def get_values(inp, out, scales):
+        # First Calculate scaling factor
+        # TODO: Figure out if scales matters here
+        if out > 1:
+            if align_corners:
+                scale_factor = (inp - 1) / (out - 1)
+            else:
+                scale_factor = 1.0 / scales if scales is not None else inp / out
         else:
-            h_scale_factor = 1.0 / scales_h if scales_h is not None else in_h / out_h
-    else:
-        h_scale_factor = 0.0
+            scale_factor = 0.0
 
-    if out_w > 1:
+        i = torch.arange(out, dtype=input.dtype, device=input.device)
         if align_corners:
-            w_scale_factor = (in_w - 1) / (out_w - 1)
+            x = scale_factor * i
         else:
-            w_scale_factor = 1.0 / scales_w if scales_w is not None else in_w / out_w
-    else:
-        w_scale_factor = 0.0
+            x = (scale_factor * (i + 0.5) - 0.5).clamp(min=0.0)
+        x_floor = x.to(torch.int64)
+        x_ceil = torch.ceil(x).clamp(max=inp - 1).to(torch.int64)
+        return x, x_floor, x_ceil
 
-    i = torch.arange(out_h, dtype=input.dtype, device=input.device)
-    j = torch.arange(out_w, dtype=input.dtype, device=input.device)
+    values = [
+        get_values(inp, out, scale)
+        for inp, out, scale in zip(inp_size, output_size, scales)
+    ]
+    xs, x_floors, x_ceils = list(zip(*values))
 
-    if align_corners:
-        x = h_scale_factor * i
-        y = w_scale_factor * j
-    else:
-        x = (h_scale_factor * (i + 0.5) - 0.5).clamp(min=0.0)
-        y = (w_scale_factor * (j + 0.5) - 0.5).clamp(min=0.0)
+    d = len(inp_size)
 
-    x_floor = x.to(torch.int64)
-    x_ceil = torch.ceil(x).clamp(max=in_h - 1).to(torch.int64)
-    y_floor = y.to(torch.int64)
-    y_ceil = torch.ceil(y).clamp(max=in_w - 1).to(torch.int64)
+    views = [xs[i].reshape(len(xs[i]), *([1] * (d - 1 - i))) for i in range(d)]
+    floor_views = [
+        x_floors[i].reshape(len(xs[i]), *([1] * (d - 1 - i))) for i in range(d)
+    ]
+    ceil_views = [
+        x_ceils[i].reshape(len(xs[i]), *([1] * (d - 1 - i))) for i in range(d)
+    ]
 
-    x_view = x.unsqueeze(1)
-    x_floor_view = x_floor.unsqueeze(1)
-    x_ceil_view = x_ceil.unsqueeze(1)
-
-    v1 = aten._unsafe_index(input, [None, None, x_floor_view, y_floor])
-    v2 = aten._unsafe_index(input, [None, None, x_ceil_view, y_floor])
-    v3 = aten._unsafe_index(input, [None, None, x_floor_view, y_ceil])
-    v4 = aten._unsafe_index(input, [None, None, x_ceil_view, y_ceil])
-
-    xscale2 = x_view - x_floor_view
-    xscale1 = 1.0 - xscale2
-
-    yscale2 = y - y_floor
-    yscale1 = 1.0 - yscale2
-
-    q1 = torch.mul(v1, xscale1) + torch.mul(v2, xscale2)
-    q2 = torch.mul(v3, xscale1) + torch.mul(v4, xscale2)
-    result = torch.mul(q1, yscale1) + torch.mul(q2, yscale2)
+    result = 0
+    for j in range(2**d):
+        # we write j in binary format to see if we are using
+        # ceil or floor.
+        n = format(j, f"00{d}b")
+        idx = [None, None]
+        xscales = []
+        for k in range(d):
+            if n[k] == "0":
+                idx.append(floor_views[k])
+                xscales.append(1.0 - (views[k] - floor_views[k]))
+            else:
+                idx.append(ceil_views[k])
+                xscales.append(views[k] - floor_views[k])
+        v = aten._unsafe_index(input, idx)
+        for xscale in xscales:
+            v = torch.mul(v, xscale)
+        result = result + v
 
     # convert output to correct memory format, if necessary
     memory_format = utils.suggest_memory_format(input)
@@ -3342,6 +3383,8 @@ def upsample_bilinear2d(
     # following "heuristic: only use channels_last path when it's faster than the contiguous path"
     if input.device.type == "cuda" and n_channels < 16:
         memory_format = torch.contiguous_format
+
+    assert isinstance(result, torch.Tensor)
 
     result = result.contiguous(memory_format=memory_format)
 
