@@ -7,6 +7,7 @@ from torch._inductor import config as inductor_config
 
 from torch.testing._internal.common_utils import IS_LINUX, TestCase as TorchTestCase
 from torch.testing._internal.inductor_utils import HAS_CUDA
+from torch.testing import make_tensor
 
 
 class TestUnbackedSymints(TorchTestCase):
@@ -29,6 +30,17 @@ class TestUnbackedSymints(TorchTestCase):
             expected = fn(*example_inputs)
 
         torch.testing.assert_close(actual, expected)
+
+    def test_expand_mismatch(self):
+
+        def fn(x):
+            nz = x.nonzero()
+            return nz.expand([-1, 128])
+
+        x = make_tensor(32, 4, device="cpu", dtype=torch.float32, exclude_zero=True)
+        with dynamo_config.patch({"capture_dynamic_output_shape_ops": True}):
+            with self.assertRaises(torch._dynamo.exc.TorchRuntimeError):
+                actual = torch.compile(fn, fullgraph=True)(x)
 
     def test_autotuning(self):
         def fn(x, y):
