@@ -741,6 +741,28 @@ def forward(self, arg0_1):
     copy_ = torch.ops.aten.copy_.default(arg0_1, mul);  arg0_1 = mul = None
     return (add,)""")
 
+    # https://github.com/pytorch/pytorch/issues/114338
+    def test_no_grad_on_outside_enable_grad_on_inside(self):
+        def f(a):
+            with torch.enable_grad():
+                out = a.sin()
+                out2 = a.sin().detach()
+                return out, out2
+        f_compiled = aot_function(f, nop)
+
+        with torch.no_grad():
+            inp_ref = torch.ones(4, requires_grad=True)
+            inp_test = torch.ones(4, requires_grad=True)
+            out_ref1, out_ref2 = f(inp_ref)
+            out_test1, out_test2 = f_compiled(inp_test)
+        self.assertEqual(out_ref1.requires_grad, out_test1.requires_grad)
+        self.assertEqual(out_ref2.requires_grad, out_test2.requires_grad)
+        self.assertEqual(out_ref1, out_test1)
+        self.assertEqual(out_ref2, out_test2)
+        out_ref1.sum().backward()
+        out_test1.sum().backward()
+        self.assertEqual(inp_ref.grad, inp_test.grad)
+
     def test_input_mutation_requires_grad_no_grad_detach_mixed(self):
         # Perform a mix of mutations on a:
         # 1 normal, 1 in no_grad, 1 on a detach'd tensor.
