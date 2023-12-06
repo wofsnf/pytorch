@@ -19,7 +19,10 @@ struct FillFunctor {
 };
 
 void fill_kernel_cuda(TensorIterator& iter, const Scalar& value) {
-  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND6(kComplexHalf, kBool, kHalf, kBFloat16, kFloat8_e4m3fn, kFloat8_e5m2, iter.dtype(), "fill_cuda", [&]() {
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND8(kComplexHalf, kBool, kHalf, kBFloat16,
+                                         kFloat8_e4m3fn, kFloat8_e5m2,
+                                         kFloat8_e4m3fnuz, kFloat8_e5m2fnuz,
+                                         iter.dtype(), "fill_cuda", [&]() {
     gpu_kernel(iter, FillFunctor<scalar_t>(value.to<scalar_t>()));
   });
 }
