@@ -482,6 +482,7 @@ class ExportedProgram:
             self.tensor_constants,
         )
 
+        # TODO: this adds an extra set of contraints in the graph. need to figure out how to remove this...
         if len(new_range_constraints) > 0 or len(new_equality_constraints) > 0:
             exported_program = exported_program._transform(
                 _AddRuntimeAssertionsForInlineConstraintsPass(
@@ -602,4 +603,8 @@ def _get_updated_range_constraints(
         for k, v in shape_env.var_to_range.items()
         if k not in shape_env.replacements
     }
+    for k, v in shape_env.runtime_var_to_range.items():
+        if k not in shape_env.replacements:
+            range_constraints[k] = v
+
     return range_constraints

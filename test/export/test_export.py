@@ -1039,6 +1039,21 @@ class TestExport(TestCase):
         ) as cm:
             ep(torch.tensor([30]))
 
+    def test_constrain_decomp(self) -> None:
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.freq = torch.ones(5, 5)
+
+            def forward(self, start_pos: torch.Tensor):
+                pos = start_pos.item()
+                torch._constrain_as_size(pos, min=0, max=4)
+                return self.freq[pos] * self.freq[pos]
+
+        ep = torch.export.export(M(), (torch.tensor(1),))
+        decompose_ep = ep.run_decompositions()
+        decompose_ep(torch.tensor(1))
+
     def test_export_with_inline_constraints_complex(self):
         def f(x):
             a = x.item()
