@@ -3274,7 +3274,6 @@ def _upsample_linear_vec(input, output_size, align_corners, scale_factors):
 
 
 @register_decomposition([aten.upsample_linear1d.default, aten.upsample_linear1d.out])
-@aten.upsample_linear1d.default.py_impl(DispatchKey.Autograd)
 @out_wrapper()
 @pw_cast_for_opmath
 def upsample_linear1d(
@@ -3305,7 +3304,6 @@ def upsample_bilinear2d(
 @register_decomposition(
     [aten.upsample_trilinear3d.default, aten.upsample_trilinear3d.out]
 )
-@aten.upsample_trilinear3d.default.py_impl(DispatchKey.Autograd)
 @out_wrapper()
 @pw_cast_for_opmath
 def upsample_trilinear3d(
