@@ -644,6 +644,12 @@ bool ProcessGroupNCCL::WorkNCCL::wait(std::chrono::milliseconds timeout) {
       static_cast<int>(devices_.size())); // worldSize
   synchronizeInternal(timeout);
   // Always return true, because abort API is not implemented.
+  if (debug_level() == DebugLevel::Detail) {
+    auto hashValue = hashTensors(*outputs_);
+    auto numel = getTensorsNumel(*outputs_);
+    PRINT_COLLECTIVE_HASH_SIGNATURE(
+        rank_, opTypeToString(opType_), numel, hashValue);
+  }
   return true;
 }
 
@@ -725,6 +731,7 @@ ProcessGroupNCCL::ProcessGroupNCCL(
   heartbeatTimeoutInSec_ =
       getCvarInt(TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC, 60 * 2 /*2 Mins*/);
   ncclTraceBufferSize_ = getCvarInt(TORCH_NCCL_TRACE_BUFFER_SIZE, 0);
+  enableCollecticeHashDebug_ = (debug_level() == DebugLevel::Detail);
 #ifdef ENABLE_NCCL_ERROR_CHECKING
   enableTiming_.store(
       getCvarBool(TORCH_NCCL_ENABLE_TIMING, false) || desyncDebug_);
@@ -2327,6 +2334,13 @@ c10::intrusive_ptr<Work> ProcessGroupNCCL::collective(
       decltype(i) stream_comm_i = (inputs_same_dev ? 0 : i);
       comms_.push_back((void*)ncclComms[stream_comm_i]->getNcclComm());
     }
+  }
+
+  if (enableCollecticeHashDebug_.load()) {
+    auto hashValue = hashTensors(inputs);
+    auto numel = getTensorsNumel(inputs);
+    PRINT_COLLECTIVE_HASH_SIGNATURE(
+        rank_, opTypeToString(opType), numel, hashValue);
   }
 
   {

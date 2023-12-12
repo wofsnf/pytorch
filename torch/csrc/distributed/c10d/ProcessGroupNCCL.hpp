@@ -69,6 +69,9 @@ static std::vector<std::string> TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC = {
 static std::vector<std::string> TORCH_NCCL_TRACE_BUFFER_SIZE = {
     "TORCH_NCCL_TRACE_BUFFER_SIZE"};
 
+constexpr const char* TORCH_NCCL_COLLECTIVE_HASH_DEBUG =
+    "TORCH_NCCL_COLLECTIVE_HASH_DEBUG";
+
 constexpr const char* NCCL_BACKEND_NAME = "nccl";
 
 constexpr const char* TIMEOUT_DUMP = "timeout_dump";
@@ -93,6 +96,11 @@ enum ErrorHandlingMode {
 #define SHOULD_CLEAN_UP(a) (a != NoHandling && a != SkipCleanUp)
 
 #define SHOULD_TEAR_DOWN(a) (a != NoHandling && a != CleanUpOnly)
+
+#define PRINT_COLLECTIVE_HASH_SIGNATURE(rank, opType, numel, hashValue) \
+  LOG(WARNING) << "[RANK" << rank << "] : Collective hash of " << opType  \
+             << " before calling into NCCL, "                           \
+             << "numel: " << numel << "hash: " << hashValue;
 
 // If set, ProcessGroupNCCL doesn't use recordStream calls to ensure
 // caching allocator safety for tensors used on both user-facing and
@@ -909,6 +917,10 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // and end events. Note that enableTiming_ is always true if desyncDebug_
   // is set to true.
   std::atomic<bool> enableTiming_;
+
+  // Flag to enable the print of hash value of input/output of collectives for
+  // verification.
+  std::atomic<bool> enableCollecticeHashDebug_;
 
   // Whether or not TORCH_NCCL_AVOID_RECORD_STREAMS was set
   bool avoidRecordStreams_ = false;

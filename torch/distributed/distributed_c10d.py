@@ -979,7 +979,7 @@ def _is_barrier_after_init() -> int:
     return int(os.getenv("TORCH_DIST_INIT_BARRIER", "0"))
 
 
-def _get_default_group() -> ProcessGroup:
+def _get_default_group():
     """Get the default process group created by init_process_group."""
     if not is_initialized():
         raise ValueError(
@@ -2156,6 +2156,8 @@ def reduce(tensor, dst, op=ReduceOp.SUM, group=None, async_op=False):
 def _object_to_tensor(obj, device):
     f = io.BytesIO()
     _pickler(f).dump(obj)
+    if dist.get_debug_level() != dist.DebugLevel.DETAIL:
+        logger.warning("_object_to_tensor hash value: {torch._C._distributed_c10d._hash_tensors([f.getvalue()])}")
     byte_storage = torch.ByteStorage._from_buffer(f.getvalue())  # type: ignore[attr-defined]
     # Do not replace `torch.ByteTensor` or `torch.LongTensor` with torch.tensor and specifying dtype.
     # Otherwise, it will casue 100X slowdown.
@@ -2166,6 +2168,8 @@ def _object_to_tensor(obj, device):
 
 
 def _tensor_to_object(tensor, tensor_size):
+    if dist.get_debug_level() != dist.DebugLevel.DETAIL:
+        logger.warning("_tensor_to_object hash value: {torch._C._distributed_c10d._hash_tensors([tensor])}")
     tensor = tensor.cpu()
     buf = tensor.numpy().tobytes()[:tensor_size]
     return _unpickler(io.BytesIO(buf)).load()
