@@ -11,11 +11,13 @@ _tensor_id_counter = 0
 _tensor_symint_registry = WeakTensorKeyDictionary()
 
 
-def get_tensor_symint(tensor, *, coeff=1):
+def get_tensor_symint(tensor, *, coeff=1, sum_offsets=None):
     global _tensor_id_counter
     tensor_symint = _tensor_symint_registry.get(tensor)
     if tensor_symint is None:
-        tensor_symint = torch._C._get_singleton_int(_tensor_id_counter, coeff)
+        tensor_symint = torch._C._get_singleton_int(
+            _tensor_id_counter, coeff, tensor, get_nt_dummy(), sum_offsets
+        )
         _tensor_id_counter += 1
         _tensor_symint_registry[tensor] = tensor_symint
     return tensor_symint
@@ -57,6 +59,7 @@ class NestedTensor(torch.Tensor):
         offsets,
         *,
         lengths=None,
+        is_dummy=None,
         **kwargs,
     ):
         ks = DispatchKeySet(DispatchKey.NestedTensor)
@@ -79,17 +82,30 @@ class NestedTensor(torch.Tensor):
         )
         return r
 
-    def __init__(self, values, offsets, *, lengths=None, **kwargs):
+    def __init__(self, values, offsets, *, lengths=None, is_dummy=False, **kwargs):
         super().__init__()
         # Only support jagged for now.
         assert offsets is not None
         assert offsets.ndim == 1
         assert not isinstance(values, NestedTensor)
 
+        self._values = values
+        self._offsets = offsets
+        self._lengths = lengths
+
         # Query cache for the symint associated with offsets or lengths
+        # offsets always exists, though sometimes lengths also exists
         # (create a new one if needed).
         ragged_source = offsets if lengths is None else lengths
-        ragged_size = get_tensor_symint(ragged_source, coeff=1)
+        if not is_dummy:
+            ragged_size = get_tensor_symint(
+                ragged_source, coeff=1, sum_offsets=values.shape[0]
+            )
+        else:
+            # Avoid infinite recursion
+            # Initialize the _values, _offsets, etc because they are checked
+            # when dispatching to jagged funcs in torch dispatch.
+            ragged_size = 0
         self._ragged_idx = kwargs.get("_ragged_idx", 1)
         B = offsets.shape[0] - 1
         Ds = values.shape[: self._ragged_idx - 1] + values.shape[self._ragged_idx :]
@@ -108,9 +124,6 @@ class NestedTensor(torch.Tensor):
                 "NestedTensor values cannot require grad, please "
                 "detach before passing to NestedTensor constructor"
             )
-        self._values = values
-        self._offsets = offsets
-        self._lengths = lengths
 
         # holds properties that are computed lazily
         self._metadata_cache = kwargs.get("_metadata_cache", {})
@@ -198,6 +211,22 @@ class NestedTensor(torch.Tensor):
             # Associate offsets or lengths (possibly fake, possibly functionalized)
             # with the ragged_size.
             ragged_size = outer_size[ragged_idx]
+            # Ordinarily, the ragged int is created the first time get_tensor_symint
+            # is called with its corresponding tensor, which enforces that the
+            # ragged int has all the extra metadata. We must replicate that here.
+            #
+            # Some notes on what happens later:
+            # - Multiplication with scalar is the only operation that produces
+            #   a singleton from singleton. If I multiply, in theory I need to
+            #   propagate all the attributes, but since singleton that result
+            #   from multply are only used for striding, and we never use those
+            #   with factory functions, so we can get away with not propagating.
+            # - We don't guard explicitly even as we enter code paths that
+            #   rely on this being the case. We assume that specializing on the
+            #   Subclass-ness of the inputs is enough.
+            ragged_size.node._singleton_data = offsets
+            ragged_size.node._singleton_dummy = get_nt_dummy()
+            ragged_size.node._singleton_sum_offsets = values.shape[0]
             _tensor_symint_registry[ragged_source] = ragged_size
 
         return NestedTensor(
@@ -235,6 +264,20 @@ class NestedTensor(torch.Tensor):
             pass
         with torch._C.DisableTorchFunctionSubclass():
             return func(*args, **kwargs)
+
+
+_nt_dummy = None
+
+
+def get_nt_dummy():
+    global _nt_dummy
+    if _nt_dummy is None:
+        _nt_dummy = NestedTensor(
+            values=torch.randn(1, 1, device="meta"),
+            offsets=torch.randn(1, device="meta"),
+            is_dummy=True,
+        )
+    return _nt_dummy
 
 
 # Not actually a view!

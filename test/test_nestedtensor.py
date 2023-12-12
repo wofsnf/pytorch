@@ -3018,7 +3018,7 @@ class TestNestedTensorSubclass(NestedTestCase):
                                     "directly calling torch.ops.aten.size"):
             torch.ops.aten.size.default(nt)
 
-        singleton_int = torch.nested._internal.nested_tensor.get_tensor_symint(_offsets, coeff=1)
+        singleton_int = torch.nested._internal.nested_tensor.get_tensor_symint(_offsets, coeff=1, sum_offsets=1)
         self.assertEqual(nt.size(), (3, singleton_int, 3))
         self.assertEqual(nt.shape, (3, singleton_int, 3))
         self.assertEqual(nt.dim(), 3)
@@ -3341,6 +3341,38 @@ class TestNestedTensorSubclass(NestedTestCase):
             self.assertEqual(len(out), len(tensor_list))
             for i, t in enumerate(out):
                 self.assertEqual(t, tensor_list[i])
+
+    @dtypes(torch.float, torch.double, torch.half)
+    @parametrize("requires_grad", [False, True])
+    def test_factory_functions(self, device, dtype, requires_grad):
+        for tensor_list in self._get_example_tensor_lists():
+            kwargs = {
+                "device": device,
+                "dtype": dtype,
+                "requires_grad": requires_grad,
+            }
+            nt = torch.nested.nested_tensor(
+                tensor_list,
+                layout=torch.jagged,
+                **kwargs
+            )
+            zeros = torch.zeros(nt.shape, **kwargs)
+            ones = torch.ones(nt.shape, **kwargs)
+            empty = torch.empty(nt.shape, **kwargs)
+            full = torch.full(nt.shape, 2, **kwargs)
+
+            self.assertEqual(zeros, nt * 0)
+            self.assertEqual(ones, nt * 0 + 1)
+            self.assertEqual(full, nt * 0 + 2)
+
+            self.assertEqual(nt.device, empty.device)
+            self.assertEqual(nt.dtype, empty.dtype)
+            self.assertEqual(nt.requires_grad, empty.requires_grad)
+
+            transposed_shape = nt.transpose(1, 2).shape
+            with self.assertRaisesRegex(
+                    ValueError, "only supports shapes of form"):
+                torch.zeros(transposed_shape, **kwargs)
 
     @torch._dynamo.config.patch(suppress_errors=True)
     def test_layer_norm_2(self, device):

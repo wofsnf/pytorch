@@ -101,6 +101,7 @@
 #include <torch/csrc/jit/tensorexpr/tensorexpr_init.h>
 #include <torch/csrc/utils/cpp_stacktraces.h>
 
+#include <ATen/core/SingletonSymNodeImpl.h>
 #include <c10/macros/Export.h>
 #include <c10/util/irange.h>
 #include <c10/util/signal_handler.h>
@@ -1285,9 +1286,28 @@ void initJITBindings(PyObject* module) {
             return node->is_symbolic();
           })
       .def(
+          "is_singleton",
+          [](const c10::SymNode& node) {
+            return node->singleton_int().has_value();
+          })
+      .def(
           "singleton_int",
           [](const c10::SymNode& node) {
             return node->singleton_int();
+          })
+      .def(
+          "singleton_data",
+          [](const c10::SymNode& node) {
+            TORCH_CHECK(node->singleton_int());
+            auto p = dynamic_cast<c10::SingletonSymNodeImpl*>(node.get());
+            return p->singleton_data();
+          })
+      .def(
+          "singleton_sum_offsets",
+          [](const c10::SymNode& node) {
+            TORCH_CHECK(node->singleton_int());
+            auto p = dynamic_cast<c10::SingletonSymNodeImpl*>(node.get());
+            return p->singleton_sum_offsets();
           })
       .def(
           "singleton_coeff",

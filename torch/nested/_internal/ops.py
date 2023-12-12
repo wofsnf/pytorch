@@ -924,3 +924,50 @@ def embedding_default(func, *args, **kwargs):
     return NestedTensor(
         func(weight, indices._values, **new_kwargs), **extract_kwargs(indices)
     )
+
+
+def get_factory_from_new_factory(aten_op):
+    factory_map = {
+        torch.ops.aten.new_zeros.default: torch.zeros,
+        torch.ops.aten.new_empty.default: torch.empty,
+        torch.ops.aten.new_full.default: torch.full,
+        torch.ops.aten.new_ones.default: torch.ones,
+    }
+    return factory_map.get(aten_op, None)
+
+
+# Note [ NestedTensor factory functions ]
+#
+# new_* functions are used to implement the factory functions for NestedTensor
+# Here, `self` is only used to enable dispatching to happen.
+# When someone calls into torch.zeros(sizes) where sizes contains a singleton,
+# The torch.zeros(sizes) call will dispatch to nt.new_zeros(sizes)
+def jagged_new_factory(func, *args, **kwargs):
+    factory_fn = get_factory_from_new_factory(func)
+
+    _, new_kwargs = normalize_function(
+        func, args=args, kwargs=kwargs, normalize_to_only_use_kwargs=True
+    )
+    new_kwargs.pop("input")
+    _unused_B, singleton, *Ds = new_kwargs.pop("size")
+    if not (isinstance(singleton, torch.SymInt) and singleton.node.is_singleton()):
+        raise ValueError(
+            f"{factory_fn.__name__}() only supports shapes of form (B, *, D1, D2...) "
+            "where only the second-left-most dimension is ragged. "
+        )
+
+    offsets = singleton.node.singleton_data()
+    sum_offsets = singleton.node.singleton_sum_offsets()
+
+    return NestedTensor(factory_fn([sum_offsets, *Ds], **new_kwargs), offsets)
+
+
+register_jagged_func(
+    [
+        torch.ops.aten.new_zeros.default,
+        torch.ops.aten.new_empty.default,
+        torch.ops.aten.new_full.default,
+        torch.ops.aten.new_ones.default,
+    ],
+    "self: jt, size: any, dtype: any?, layout: any?, device: any?, pin_memory: any?",
+)(jagged_new_factory)

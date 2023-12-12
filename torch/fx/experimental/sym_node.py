@@ -77,6 +77,13 @@ class SymNode:
     ):
         self._expr = expr
         self.shape_env = shape_env
+        # Symbolic singleton int have pytype int. The is_singleton-ness of a
+        # SymNode is determined by whether it holds a singleton_dummy.
+        # The fields below are set after the SymNode is created, but before
+        # it is assigned to the size field of a NestedTensor.
+        self._singleton_data = None
+        self._singleton_dummy = None
+        self._singleton_sum_offsets = None
         self.pytype = pytype
         # What's the difference between hint and constant?
         #
@@ -170,6 +177,28 @@ class SymNode:
 
     def is_bool(self):
         return self.pytype is bool
+
+    def is_singleton(self):
+        return self._singleton_dummy is not None or (
+            # In case singleton SymNode is not fully initialized.
+            self.hint is not None
+            and isinstance(self.hint, SymInt)
+            and self.hint.node.is_singleton()
+        )
+
+    def singleton_dummy(self):
+        # Factory functions call this without checking is_singleton first.
+        # Even if we know this is a singleton SymNode, we do not if we are fully
+        # initialized.
+        return self._singleton_dummy
+
+    def singleton_data(self):
+        assert self._singleton_data is not None
+        return self._singleton_data
+
+    def singleton_sum_offsets(self):
+        assert self._singleton_sum_offsets is not None
+        return self._singleton_sum_offsets
 
     def wrap_int(self, num):
         assert type(num) is int
