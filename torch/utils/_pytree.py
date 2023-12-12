@@ -269,9 +269,6 @@ def _private_register_pytree_node(
                 "be None or registered."
             )
 
-        if serialized_type_name is None:
-            serialized_type_name = f"{cls.__module__}.{cls.__qualname__}"
-
         serialize_node_def = _SerializeNodeDef(
             cls,
             serialized_type_name,
