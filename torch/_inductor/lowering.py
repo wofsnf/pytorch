@@ -5090,7 +5090,7 @@ register_foreach_pointwise(aten._foreach_clamp_max.List, minimum)
 register_foreach_pointwise(aten._foreach_clamp_max.Scalar, minimum)
 register_foreach_pointwise(aten._foreach_reciprocal, reciprocal)
 register_foreach_pointwise(aten._foreach_sign, sign)
-register_foreach_pointwise(aten._foreach_copy, copy)
+register_foreach_pointwise(aten._foreach_copy, copy_)
 
 
 # these are only encountered as outputs of the graph
