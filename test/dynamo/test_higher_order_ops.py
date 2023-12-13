@@ -1229,6 +1229,142 @@ class GraphModule(torch.nn.Module):
             },
         )
 
+    def test_cond_raise_error_when_mutating_buffer(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("buffer", torch.randn(4, 4))
+
+            def forward(self, x):
+                def true_fn(x):
+                    self.buffer.add_(5)
+                    return x.cos() + self.buffer.sum()
+
+                def false_fn(x):
+                    return x.sin()
+
+                a = torch.cond(x.shape[0] > 4, true_fn, false_fn, [x])
+                return (a + 3, a + 4)
+
+        inp = torch.randn(3, 4)
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            torch.compile(M())(inp)
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            M()(inp)
+
+    def test_cond_raise_error_when_mutating_input(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("buffer", torch.randn(4, 4))
+
+            def forward(self, x):
+                def true_fn(x):
+                    return x.cos_() + self.buffer.sum()
+
+                def false_fn(x):
+                    return x.sin_()
+
+                a = torch.cond(x.shape[0] > 4, true_fn, false_fn, [x])
+                return (a + 3, a + 4)
+
+        inp = torch.randn(3, 4)
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            torch.compile(M())(inp)
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            M()(inp)
+
+    def test_cond_raise_error_when_mutating_closure(self):
+        t = torch.randn(1)
+
+        def fn(x):
+            def true_fn(x):
+                t.sin_()
+                return x.cos() + t
+
+            def false_fn(x):
+                return x.sin()
+
+            a = torch.cond(x.shape[0] > 4, true_fn, false_fn, [x])
+            return (a + 3, a + 4)
+
+        inp = torch.randn(3, 4)
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            torch.compile(fn)(inp)
+
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.UncapturedHigherOrderOpError,
+            r"Cond doesn't work unless it is captured completely with torch.compile",
+        ):
+            fn(inp)
+
+    def test_cond_raise_error_when_output_alias_input(self):
+        def alias_input(pred, x, y):
+            def true_fn(x):
+                return x[0] + 1, x[1].view(-1) + 1
+
+            def false_fn(x):
+                return x[0] + 1, x[1].view(-1)
+
+            return torch.cond(pred, true_fn, false_fn, ((x, y),))
+
+        with self.assertRaises(torch._dynamo.exc.UncapturedHigherOrderOpError):
+            torch.compile(alias_input, backend="eager")(
+                torch.tensor(True), torch.ones(3, 3), torch.ones(3, 3)
+            )
+
+    def test_cond_raise_error_when_output_alias_buffer(self):
+        class AliaseBufferM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("buffer", torch.randn(4, 4))
+
+            def forward(self, x):
+                def true_fn(x):
+                    return x.cos(), self.buffer.view(-1)
+
+                def false_fn(x):
+                    return x.sin(), self.buffer.view(-1) + 1
+
+                return torch.cond(x.shape[0] > 4, true_fn, false_fn, [x])
+
+        inp = torch.randn(3, 4)
+        with self.assertRaises(torch._dynamo.exc.UncapturedHigherOrderOpError):
+            torch.compile(AliaseBufferM(), backend="eager")(inp)
+
+    def test_cond_raise_error_when_output_alias_closure(self):
+        y = torch.ones(3, 4)
+
+        def alias_closure(pred, x):
+            def true_fn(x):
+                return x.view(-1) + 1
+
+            def false_fn(x):
+                return y.view(-1)
+
+            return torch.cond(pred, true_fn, false_fn, [x])
+
+        inp = torch.randn(3, 4)
+        with self.assertRaises(torch._dynamo.exc.UncapturedHigherOrderOpError):
+            torch.compile(alias_closure, backend="eager")(torch.tensor(False), inp)
+
     @torch._dynamo.config.patch(
         assume_static_by_default=True,
         dynamic_shapes=True,
@@ -1463,7 +1599,7 @@ def forward(self):
     def test_cond_with_constant_pred(self):
         def test(pred, x):
             def true_fn(x):
-                return x
+                return x + 1
 
             def false_fn(x):
                 return -x
@@ -3621,7 +3757,7 @@ class ActivationCheckpointingTests(torch._dynamo.test_case.TestCase):
 
         def test(pred, x):
             def true_fn(x):
-                return x
+                return x + 1
 
             def false_fn(x):
                 return -x

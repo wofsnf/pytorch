@@ -116,6 +116,41 @@ def _call_function_and_unflatten_output(tx, fn, args, kwargs, ret_vt, ret_treesp
     )
 
 
+# NOTE:
+# Mutation detection: We detect mutations by checking the example_value's _version
+# This approach has a corner case that if torch.compile is wrapped
+# by an inference_mode(True) context manager, the tensor version will not be upated.
+# So we override the inference_mode to False then run the extracted graph module.
+#
+# Aliasing detection: We detect mutations by checking the example_value's _version
+# This approach has a corner case that if torch.compile is wrapped
+# by an inference_mode(True) context manager, the tensor version will not be upated.
+# So we override the inference_mode to False then run the extracted graph module.
+def _detect_input_mutations_and_aliasing(tx, graph_module, proxy_args):
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    example_values = [arg.node.meta["example_value"] for arg in proxy_args]
+    _before_versions = [ex._version for ex in example_values]
+    with torch.inference_mode(False), tx.fake_mode, enable_python_dispatcher():
+        res = graph_module(*example_values)
+    mutated_inputs = [
+        proxy_args[i]
+        for i, (val, old_v) in enumerate(zip(example_values, _before_versions))
+        if val._version != old_v
+    ]
+
+    aliased_inputs = []
+    input_storages = {
+        StorageWeakRef(proxy.node.meta["example_value"]._typed_storage()): proxy
+        for proxy in proxy_args
+    }
+    output_storages = [StorageWeakRef(t._typed_storage()) for t in res]
+    aliased_inputs = [
+        input_storages[ref] for ref in output_storages if ref in input_storages
+    ]
+    return mutated_inputs, aliased_inputs
+
+
 def _assert_tensors_nonaliasing(inputs, outputs):
     input_tensor_ids = {
         id(t) for t in pytree.tree_leaves(inputs) if isinstance(t, torch.Tensor)
@@ -661,29 +696,62 @@ class CondHigherOrderVariable(TorchHigherOrderOperatorVariable):
             false_graph, false_lifted_freevars, false_shared, unique_true, unique_false
         )
 
+        true_graph_module = torch.fx.GraphModule(true_nn_modules, true_graph)
+        false_graph_module = torch.fx.GraphModule(false_nn_modules, false_graph)
         true_name = add_subgraph(
             tx,
             self.source,
             "cond_true",
-            torch.fx.GraphModule(true_nn_modules, true_graph),
+            true_graph_module,
         )
         false_name = add_subgraph(
             tx,
             self.source,
             "cond_false",
-            torch.fx.GraphModule(false_nn_modules, false_graph),
+            false_graph_module,
         )
 
         true_node = make_attr(tx, true_name)
         false_node = make_attr(tx, false_name)
 
+        combined_args = true_shared + unique_true + unique_false
         p_args = (
             args[0].as_proxy(),
             true_node,
             false_node,
             # We pick true_shared but it shouldn't matter
-            true_shared + unique_true + unique_false,
+            combined_args,
         )
+
+        for branch_name, module in (
+            (True, true_graph_module),
+            (False, false_graph_module),
+        ):
+            try:
+                mutated_inputs, aliased_inputs = _detect_input_mutations_and_aliasing(
+                    tx, module, combined_args
+                )
+            except Exception as e:
+                unimplemented(
+                    f"Failed to detect input mutations and aliasing in {branch_name} branch of cond: {e}"
+                )
+
+            def _fmt(proxies):
+                msg = []
+                for i, proxy in enumerate(proxies):
+                    msg.append("- " + str(proxy.node.meta))
+                return "\n".join(msg)
+
+            if len(mutated_inputs) > 0:
+                unimplemented(
+                    "Expected branches to not mutate inputs, buffers, or closures "
+                    f"but found following mutations in {branch_name} branch:\n{_fmt(mutated_inputs)}"
+                )
+            if len(aliased_inputs) > 0:
+                unimplemented(
+                    "Expected branches to not aliase inputs, buffers, or closures "
+                    f"but found following inputs are aliased in {branch_name} branch:\n{_fmt(aliased_inputs)}"
+                )
 
         return _call_function_and_unflatten_output(
             tx, torch.ops.higher_order.cond, p_args, {}, true_r, true_treespec
