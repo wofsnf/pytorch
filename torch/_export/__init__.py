@@ -146,6 +146,7 @@ def capture_pre_autograd_graph(
     args: Tuple[Any],
     kwargs: Optional[Dict[str, Any]] = None,
     constraints: Optional[List[Constraint]] = None,
+    _functional_pre_dispatch_IR: bool = False,
 ) -> torch.nn.Module:
     """
     A helper function that is intended to trace a module before any pre-autograd
@@ -176,47 +177,51 @@ def capture_pre_autograd_graph(
         torch.ops.aten.native_batch_norm.default: torch.ops.aten.native_batch_norm.default.decompose,
     }
 
-    if kwargs is None:
-        kwargs = {}
+    if not _functional_pre_dispatch_IR:
+        if kwargs is None:
+            kwargs = {}
 
-    with torch._dynamo.config.patch(dataclasses.asdict(DEFAULT_EXPORT_DYNAMO_CONFIG)):
-        m = torch._dynamo.export(
-            f,
-            constraints=constraints,
-            assume_static_by_default=True,
-            tracing_mode="symbolic",
-            decomposition_table=decomp_table,
-            pre_dispatch=True,
-            aten_graph=True,
-        )(
-            *args,
-            **kwargs,
-        )[0]
+        with torch._dynamo.config.patch(dataclasses.asdict(DEFAULT_EXPORT_DYNAMO_CONFIG)):
+            m = torch._dynamo.export(
+                f,
+                constraints=constraints,
+                assume_static_by_default=True,
+                tracing_mode="symbolic",
+                decomposition_table=decomp_table,
+                pre_dispatch=True,
+                aten_graph=True,
+            )(
+                *args,
+                **kwargs,
+            )[0]
 
-        def _train(self, mode: bool = True):
-            raise NotImplementedError("Calling train() is not supported yet.")
+            _, _, _, fake_mode = _convert_input_to_fake(m, args, kwargs)
 
-        def _eval(self, mode: bool = True):
-            raise NotImplementedError("Calling eval() is not supported yet.")
+            m.meta["inline_constraints"] = {
+                k: v
+                for k, v in fake_mode.shape_env.runtime_var_to_range.items()
+                if re.match(r"^[if]\d+$", str(k))
+            }
 
-        _, _, _, fake_mode = _convert_input_to_fake(m, args, kwargs)
+            flat_args, _ = pytree.tree_flatten((args, kwargs or {}))
+            range_constraints, equality_constraints = _process_constraints(m, 0, flat_args)
+            module = _create_stateful_graph_module(
+                m,
+                range_constraints=range_constraints,
+                equality_constraints=equality_constraints,
+            )
+    else:
+        module = _export(f, args, kwargs, constraints=constraints, pre_dispatch=True, decomp_table=decomp_table).module()
 
-        m.meta["inline_constraints"] = {
-            k: v
-            for k, v in fake_mode.shape_env.runtime_var_to_range.items()
-            if re.match(r"^[if]\d+$", str(k))
-        }
+    def _train(self, mode: bool = True):
+        raise NotImplementedError("Calling train() is not supported yet.")
 
-        flat_args, _ = pytree.tree_flatten((args, kwargs or {}))
-        range_constraints, equality_constraints = _process_constraints(m, 0, flat_args)
-        unlifted_m = _create_stateful_graph_module(
-            m,
-            range_constraints=range_constraints,
-            equality_constraints=equality_constraints,
-        )
-        unlifted_m.train = types.MethodType(_train, m)  # type: ignore[method-assign]
-        unlifted_m.eval = types.MethodType(_eval, m)  # type: ignore[method-assign]
-        return unlifted_m
+    def _eval(self, mode: bool = True):
+        raise NotImplementedError("Calling eval() is not supported yet.")
+
+    module.train = types.MethodType(_train, module)  # type: ignore[method-assign]
+    module.eval = types.MethodType(_eval, module)  # type: ignore[method-assign]
+    return module
 
 
 def _export_to_torch_ir(
@@ -274,6 +279,8 @@ def _export_non_strict(
     fake_kwargs,
     fake_params_buffers,
     *,
+    pre_dispatch=False,
+    decomp_table=None,
     transform=lambda x: x  # TODO(zhxchen17) Revisit if this is needed later.
 ):
     # This _reparametrize_module makes sure inputs and module.params/buffers have the same fake_mode,
@@ -283,7 +290,9 @@ def _export_non_strict(
         gm, graph_signature = transform(aot_export_module)(
             mod,
             (*fake_args, *fake_kwargs.values()),
-            trace_joint=False
+            trace_joint=False,
+            pre_dispatch=pre_dispatch,
+            decompositions=decomp_table,
         )
 
     # NOTE: aot_export adds symint metadata for placeholders with int values;
@@ -359,6 +368,8 @@ def _export(
     constraints: Optional[List[Constraint]] = None,
     *,
     strict: bool = True,
+    decomp_table: Optional[Dict[str, Callable]] = None,
+    pre_dispatch: bool = False,
     preserve_module_call_signature: Tuple[str, ...] = (),
 ) -> ExportedProgram:
     """
