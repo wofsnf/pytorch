@@ -62,6 +62,58 @@ class DeviceMeshTest(DTensorTestBase):
         self.destroy_pg()
 
     @with_comms
+    def test_reuse_process_group(self):
+        from torch.distributed import new_group
+
+        tp_group_0 = new_group([0, 1])
+        tp_group_1 = new_group([2, 3])
+        dp_group_0 = new_group([0, 2])
+        dp_group_1 = new_group([1, 3])
+
+        # test init_device_mesh with mesh_dim_names
+        mesh_shape = (2, self.world_size // 2)
+        mesh_dim_names = ("DP", "TP")
+        mesh_2d = init_device_mesh(
+            self.device_type, mesh_shape, mesh_dim_names=mesh_dim_names
+        )
+
+        from torch.distributed.distributed_c10d import _world
+
+        tags_to_pg = _world.tags_to_pg
+
+        # For each rank, there should be 4 tags_to_pg, including tags:
+        #   1) default tag for user PGs (which contains all the pgs on a particular rank)
+        #   2) tag for world size pg
+        #   3) tag for tp pg
+        #   4) tag for dp pg
+        self.assertEqual(len(tags_to_pg), 4)
+        # "" is the default tag for user PGs, and the default tag should only
+        # contain 3 pgs, since we re-use pgs, whenever possible. The 3 pgs are:
+        #   1) pg for the whole world
+        #   2) pg for tp_group
+        #   3) pg for dp_group
+        self.assertEqual(len(tags_to_pg[""]), 3)
+
+        from torch.distributed import get_process_group_ranks
+
+        default_user_pgs = tags_to_pg[""]
+        dp_dim = 0
+        tp_dim = 1
+        for idx, group in enumerate(default_user_pgs):
+            # world size pg
+            if idx == 0:
+                self.assertEqual(get_process_group_ranks(group), range(self.world_size))
+            # tp pg
+            if idx == 1:
+                # rank0 - mesh_2d._dim_group_infos is: [('ptd:3', [0, 2]), ('ptd:1', [0, 1])]
+                tp_group_ranks = mesh_2d._dim_group_infos[tp_dim][-1]
+                self.assertEqual(get_process_group_ranks(group), tp_group_ranks)
+            # dp pg
+            if idx == 2:
+                dp_group_ranks = mesh_2d._dim_group_infos[dp_dim][-1]
+                self.assertEqual(get_process_group_ranks(group), dp_group_ranks)
+
+    @with_comms
     def test_get_group(self):
         mesh_shape = (2, self.world_size // 2)
         mesh_2d = init_device_mesh(

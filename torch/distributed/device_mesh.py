@@ -287,10 +287,16 @@ else:
                     # for each dim and append the groups
                     for dim_mesh in pg_ranks_by_dim:
                         subgroup_ranks = dim_mesh.tolist()
-                        # call new_group regardless of the current rank in the
-                        # pg or not, it's required that all ranks participate
-                        # in subgroup construction
-                        dim_group = new_group(ranks=subgroup_ranks)
+                        # if dim_group exists for given subgroup_ranks, we re-use it.
+                        # "" is the default tag for user PGs, and it contains all pgs for a given rank.
+                        dim_group = _find_pg_by_ranks_and_tag(
+                            tag="", ranks=subgroup_ranks
+                        )
+                        if not dim_group:
+                            # call new_group regardless of the current rank in the
+                            # pg or not, it's required that all ranks participate
+                            # in subgroup construction
+                            dim_group = new_group(ranks=subgroup_ranks)
                         # only add to dim_groups if the current rank in the subgroup
                         if self.get_rank() in subgroup_ranks:
                             if len(dim_group_infos) > dim:
@@ -299,7 +305,7 @@ else:
                                     f"in {subgroup_ranks}!"
                                 )
                             dim_group_infos.append(
-                                (_get_group_tag(dim_group), subgroup_ranks)
+                                (_get_group_tag(dim_group), subgroup_ranks)  # type: ignore[arg-type]
                             )
             self._dim_group_infos = dim_group_infos
 
