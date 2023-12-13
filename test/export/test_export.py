@@ -1845,5 +1845,62 @@ def forward(self, l_x_):
         ep.run_decompositions(decomp_table=torch._decomp.decomposition_table)
         self.assertEqual(ep(t, dim, index, src), output)
 
+    def test_nn_module_stack(self):
+        class Leaf(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.linear(x)
+
+        class Bar(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.leaf = Leaf()
+                self.register_buffer("buffer", torch.randn(4, 4))
+
+            def forward(self, x):
+                return self.buffer.sum() + self.leaf(x).sum()
+
+        class Foo(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.bar = Bar()
+
+            def forward(self, x):
+                y = self.bar.buffer + x
+                return (self.bar(x) + y.sum(),)
+
+        inp = (torch.randn(4, 4),)
+        mod = Foo()
+        ep_strict = torch.export.export(mod, inp)
+        ep_non_strict = torch.export.export(mod, inp, strict=False)
+
+        gm_unflat_non_strict = ep_non_strict.module(flat=False)
+        self.assertTrue(hasattr(gm_unflat_non_strict, "bar"))
+        self.assertTrue(hasattr(gm_unflat_non_strict.bar, "buffer"))
+        self.assertTrue(hasattr(gm_unflat_non_strict.bar, "leaf"))
+
+        gm_unflat_strict = ep_strict.module(flat=False)
+
+        self.assertEqual(gm_unflat_non_strict(*inp), gm_unflat_strict(*inp))
+        self.assertExpectedInline(
+            str(gm_unflat_non_strict.bar.leaf.linear.code).strip(), """\
+def forward(self, arg3_1):
+    bias = self.bias
+    weight = self.weight
+    t = torch.ops.aten.t.default(weight);  weight = None
+    addmm = torch.ops.aten.addmm.default(bias, arg3_1, t);  bias = arg3_1 = t = None
+    return addmm"""
+        )
+
+        gm_flat_non_strict = ep_non_strict.module()
+        gm_flat_strict = ep_strict.module()
+
+        self.assertEqual(gm_flat_non_strict(*inp), gm_flat_strict(*inp))
+
+
+
 if __name__ == '__main__':
     run_tests()
